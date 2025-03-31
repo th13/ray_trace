@@ -14,6 +14,14 @@ const Pixel = struct {
         try stdout.writeByte(self.g);
         try stdout.writeByte(self.b);
     }
+
+    fn black() Self {
+        return .{ .r = 0, .g = 0, .b = 0 };
+    }
+
+    fn white() Self {
+        return .{ .r = 255, .g = 255, .b = 255 };
+    }
 };
 
 const Image = struct {
@@ -51,9 +59,9 @@ fn makeCenterCircle(allocator: std.mem.Allocator, width: usize, height: usize, r
             const dx = ix - iwidth;
             const index = y * width + x;
             if (dx * dx + dy * dy > r * r) {
-                img[index] = .{ .r = 0, .b = 0, .g = 0 };
+                img[index] = Pixel.white();
             } else {
-                img[index] = .{ .r = 144, .b = 132, .g = 89 };
+                img[index] = Pixel.black();
             }
         }
     }
