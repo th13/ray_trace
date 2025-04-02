@@ -74,6 +74,14 @@ fn makeCenterCircle(allocator: std.mem.Allocator, width: usize, height: usize, r
 
 const Vec3 = @Vector(3, f32);
 
+fn mag(v: Vec3) f32 {
+    return @sqrt(dot(v, v));
+}
+
+fn norm(v: Vec3) Vec3 {
+    return div(v, mag(v));
+}
+
 fn dot(a: Vec3, b: Vec3) f32 {
     const prod = a * b;
     return @reduce(.Add, prod);
@@ -81,6 +89,10 @@ fn dot(a: Vec3, b: Vec3) f32 {
 
 fn mul(a: f32, x: Vec3) Vec3 {
     return x * @as(Vec3, @splat(a));
+}
+
+fn div(x: Vec3, a: f32) Vec3 {
+    return mul(1.0 / a, x);
 }
 
 const Sphere = struct {
@@ -119,26 +131,52 @@ const Camera = struct {
     }
 };
 
-fn project(allocator: std.mem.Allocator, sphere: Sphere, camera: Camera, width: usize, height: usize) !Image {
-    var data = try allocator.alloc(Pixel, width * height);
-    for (0..height) |y| {
-        for (0..width) |x| {
-            const ix: i32 = @intCast(x);
-            const iy: i32 = @intCast(y);
-            const ray = camera.rayFromPixel(ix, iy, @intCast(width), @intCast(height));
-            const index = y * width + x;
+const Screen = struct {
+    const Self = @This();
+    const camera_up: Vec3 = .{ 0, 1, 0 };
+    const camera_right: Vec3 = .{ 1, 0, 0 };
+    width: f32,
+    height: f32,
+    focal_distance: f32,
+
+    fn pixelToWorld(self: Self, x: usize, y: usize) Vec3 {
+        const fx = @as(f32, @floatFromInt(x));
+        const fy = @as(f32, @floatFromInt(y));
+        const x_world = fx - self.width / 2.0;
+        const y_world = self.height / 2.0 - fy;
+        // This should probably actually be computed when creating the screen, relative to
+        // camera.
+        const z_world = -self.focal_distance;
+        return .{ x_world, y_world, z_world };
+    }
+
+    fn rayFromCameraThroughPixel(self: Self, camera: Camera, x: f32, y: f32) Vec3 {
+        const screen_center = camera.position + mul(self.focal_distance, camera.direction);
+        const pixel_to_scene = screen_center + mul(x, camera_right) + mul(y, camera_up);
+        const d = pixel_to_scene - camera.position;
+        return norm(d);
+    }
+};
+
+fn project(allocator: std.mem.Allocator, camera: Camera, screen: Screen, sphere: Sphere) !Image {
+    const img_width: usize = @intFromFloat(screen.width);
+    const img_height: usize = @intFromFloat(screen.height);
+    var data = try allocator.alloc(Pixel, img_width * img_height);
+    for (0..img_height) |y| {
+        for (0..img_width) |x| {
+            const screen_coord = screen.pixelToWorld(x, y);
+            const ray = screen.rayFromCameraThroughPixel(camera, screen_coord[0], screen_coord[1]);
+            const index = y * img_width + x;
             if (sphere.rayIntersect(camera, ray)) |dist| {
-                std.debug.print("ray intersected at dist = {d:.2}", .{dist});
+                std.debug.print("ray intersected at dist = {d:.2}\n", .{dist});
                 data[index] = Pixel.black();
             } else {
                 data[index] = Pixel.white();
             }
-            debug.print("({d}, {d}) = {d}\n", .{ x, y, data[index].r });
         }
     }
-    return Image.init(width, height, data);
+    return Image.init(@intFromFloat(screen.width), @intFromFloat(screen.height), data);
 }
-
 //------------------------------------------------------------
 
 pub fn main() !void {
@@ -146,27 +184,23 @@ pub fn main() !void {
     defer debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
-    const width = 64;
-    const height = 48;
-    const r = 5;
-
-    // const circle = try makeCenterCircle(allocator, width, height, r);
-    // defer allocator.free(circle);
-
-    // const circleImg = Image.init(width, height, circle);
-    // try circleImg.printP6();
-
     const sphere = Sphere{
         .center = .{ 0, 0, 0 },
-        .r = r,
+        .r = 19,
     };
 
     const camera = Camera{
         .position = .{ 0, 0, -20 },
-        .direction = .{ 0, 0, 0 },
+        .direction = .{ 0, 0, 1 },
     };
 
-    const proj = try project(allocator, sphere, camera, width, height);
+    const screen = Screen{
+        .width = 480,
+        .height = 240,
+        .focal_distance = 10,
+    };
+
+    const proj = try project(allocator, camera, screen, sphere);
     defer allocator.free(proj.data);
     try proj.printP6();
 }
