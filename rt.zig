@@ -99,21 +99,22 @@ const Sphere = struct {
     const Self = @This();
     center: Vec3,
     r: f32,
+    color: Pixel,
 
-    fn rayIntersect(self: Self, camera: Camera, ray: Vec3) ?f32 {
+    fn rayIntersect(self: Self, camera: Camera, ray: Vec3) f32 {
         const L = camera.position - self.center;
         const a = dot(ray, ray);
         const b = 2 * dot(ray, L);
         const c = dot(L, L) - self.r * self.r;
         const discriminant = b * b - 4.0 * a * c;
 
-        if (discriminant < 0) return null;
+        if (discriminant < 0) return -1;
         const sqrt_disc = @sqrt(discriminant);
         const t0 = (-b - sqrt_disc) / 2.0 * a;
         const t1 = (-b + sqrt_disc) / 2.0 * a;
         if (t0 > 0) return t0;
         if (t1 > 0) return t1;
-        return null;
+        return -1;
     }
 };
 
@@ -158,7 +159,7 @@ const Screen = struct {
     }
 };
 
-fn project(allocator: std.mem.Allocator, camera: Camera, screen: Screen, sphere: Sphere) !Image {
+fn project(allocator: std.mem.Allocator, camera: Camera, screen: Screen, sphere: Sphere, sphere2: Sphere) !Image {
     const img_width: usize = @intFromFloat(screen.width);
     const img_height: usize = @intFromFloat(screen.height);
     var data = try allocator.alloc(Pixel, img_width * img_height);
@@ -167,12 +168,22 @@ fn project(allocator: std.mem.Allocator, camera: Camera, screen: Screen, sphere:
             const screen_coord = screen.pixelToWorld(x, y);
             const ray = screen.rayFromCameraThroughPixel(camera, screen_coord[0], screen_coord[1]);
             const index = y * img_width + x;
-            if (sphere.rayIntersect(camera, ray)) |dist| {
-                std.debug.print("ray intersected at dist = {d:.2}\n", .{dist});
-                data[index] = Pixel.black();
-            } else {
-                data[index] = Pixel.white();
-            }
+            const sphere_intersect = sphere.rayIntersect(camera, ray);
+            const sphere2_intersect = sphere2.rayIntersect(camera, ray);
+
+            // @todo this logic is probably horribly naive and won't scale well to additional
+            // spheres, but will explore later.
+            const use_sphere_color = sphere_intersect >= 0 and (sphere2_intersect < 0 or sphere2_intersect >= 0 and sphere_intersect > sphere2_intersect);
+            const use_sphere2_color = !use_sphere_color and sphere2_intersect >= 0;
+
+            const color = if (use_sphere_color)
+                sphere.color
+            else if (use_sphere2_color)
+                sphere2.color
+            else
+                Pixel.black();
+
+            data[index] = color;
         }
     }
     return Image.init(@intFromFloat(screen.width), @intFromFloat(screen.height), data);
@@ -185,22 +196,29 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const sphere = Sphere{
-        .center = .{ 0, 0, 0 },
-        .r = 19,
+        .center = .{ 0, 40, 0 },
+        .r = 20,
+        .color = .{ .r = 234, .g = 89, .b = 187 },
+    };
+
+    const sphere_blue = Sphere{
+        .center = .{ -70, -10, 0 },
+        .r = 20,
+        .color = .{ .r = 10, .g = 20, .b = 180 },
     };
 
     const camera = Camera{
-        .position = .{ 0, 0, -20 },
+        .position = .{ 0, 0, -90 },
         .direction = .{ 0, 0, 1 },
     };
 
     const screen = Screen{
-        .width = 480,
-        .height = 240,
-        .focal_distance = 10,
+        .width = 640,
+        .height = 480,
+        .focal_distance = 416,
     };
 
-    const proj = try project(allocator, camera, screen, sphere);
+    const proj = try project(allocator, camera, screen, sphere, sphere_blue);
     defer allocator.free(proj.data);
     try proj.printP6();
 }
