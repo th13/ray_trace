@@ -142,13 +142,27 @@ const Screen = struct {
 
 const Scene = struct {
     const Self = @This();
+
     const SphereIntersect = struct {
         sphere: Sphere,
         intersection: f32,
     };
+
     camera: Camera,
     screen: Screen,
-    spheres: []Sphere,
+    spheres: std.ArrayList(Sphere),
+
+    fn init(allocator: std.mem.Allocator, camera: Camera, screen: Screen) Self {
+        return .{
+            .camera = camera,
+            .screen = screen,
+            .spheres = std.ArrayList(Sphere).init(allocator),
+        };
+    }
+
+    fn deinit(self: Self) void {
+        self.spheres.deinit();
+    }
 
     /// Projects the current scene state onto a newly allocated `Image`.
     fn project(self: Self, allocator: std.mem.Allocator) !Image {
@@ -165,7 +179,7 @@ const Scene = struct {
                 // Calculate closest sphere.
                 var closest_intersect: f32 = -1;
                 var closest_sphere: ?Sphere = null;
-                for (self.spheres) |sphere| {
+                for (self.spheres.items) |sphere| {
                     const intersect = sphere.rayIntersect(self.camera, ray);
                     if (intersect > 0 and (intersect < closest_intersect or closest_intersect < 0)) {
                         closest_intersect = intersect;
@@ -191,20 +205,6 @@ pub fn main() !void {
     defer debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
-    const sphere = Sphere{
-        .name = "Sphere (Pink)",
-        .center = .{ 0, 40, 20 },
-        .r = 20,
-        .color = Color.rgb(234, 89, 187),
-    };
-
-    const sphere_blue = Sphere{
-        .name = "Sphere (Blue)",
-        .center = .{ -20, 40, 0 },
-        .r = 10,
-        .color = Color.rgb(10, 20, 180),
-    };
-
     const camera = Camera{
         .position = .{ 0, 0, -90 },
         .direction = .{ 0, 0, 1 },
@@ -216,22 +216,31 @@ pub fn main() !void {
         .focal_distance = 416,
     };
 
-    const spheres = try allocator.alloc(Sphere, 2);
-    defer allocator.free(spheres);
-    spheres[0] = sphere;
-    spheres[1] = sphere_blue;
+    var scene = Scene.init(allocator, camera, screen);
+    defer scene.deinit();
 
-    const scene = Scene{
-        .camera = camera,
-        .screen = screen,
-        .spheres = spheres,
-    };
+    try scene.spheres.append(Sphere{
+        .name = "Sphere (Pink)",
+        .center = .{ 0, 40, 20 },
+        .r = 20,
+        .color = Color.rgb(234, 89, 187),
+    });
+
+    try scene.spheres.append(Sphere{
+        .name = "Sphere (Blue)",
+        .center = .{ -20, 40, 0 },
+        .r = 10,
+        .color = Color.rgb(10, 20, 180),
+    });
+
+    try scene.spheres.append(Sphere{
+        .name = "Sphere 3",
+        .center = .{ 0, 0, 0 },
+        .r = 30,
+        .color = Color.rgb(10, 197, 100),
+    });
 
     const proj = try scene.project(allocator);
     defer allocator.free(proj.data);
     try proj.printP6();
-
-    //const proj = try project(allocator, camera, screen, sphere, sphere_blue);
-    //defer allocator.free(proj.data);
-    //try proj.printP6();
 }
