@@ -3,6 +3,7 @@ const stdout = std.io.getStdOut().writer();
 const debug = std.debug;
 const math = std.math;
 const expect = std.testing.expect;
+const tp = @import("tp.zig");
 
 const Color = struct {
     const Self = @This();
@@ -26,6 +27,11 @@ const Color = struct {
 
     fn intensify(self: Self, intensity: f32) Self {
         return .{ .intensities = mul(intensity, self.intensities) };
+    }
+
+    fn addLighting(self: Self, light: Light) Self {
+        const blend = self.intensities * light.color.intensities;
+        return .{ .intensities = mul(light.intensity, blend) };
     }
 
     fn print(self: Self) !void {
@@ -104,7 +110,7 @@ fn div(x: Vec3, a: f32) Vec3 {
 }
 
 fn dist(a: Vec3, b: Vec3) f32 {
-    return mag(a - b);
+    return @abs(mag(a - b));
 }
 
 const Sphere = struct {
@@ -114,8 +120,8 @@ const Sphere = struct {
     r: f32,
     color: Color,
 
-    fn rayIntersect(self: Self, camera: Camera, ray: Vec3) f32 {
-        const L = camera.position - self.center;
+    fn rayIntersect(self: Self, position: Vec3, ray: Vec3) f32 {
+        const L = position - self.center;
         const a = dot(ray, ray);
         const b = 2 * dot(ray, L);
         const c = dot(L, L) - self.r * self.r;
@@ -190,13 +196,15 @@ const Scene = struct {
     camera: Camera,
     screen: Screen,
     light: Light,
+    ambient_light: f32,
     spheres: std.ArrayList(Sphere),
 
-    fn init(allocator: std.mem.Allocator, camera: Camera, screen: Screen, light: Light) Self {
+    fn init(allocator: std.mem.Allocator, camera: Camera, screen: Screen, light: Light, ambient_light: f32) Self {
         return .{
             .camera = camera,
             .screen = screen,
             .light = light,
+            .ambient_light = ambient_light,
             .spheres = std.ArrayList(Sphere).init(allocator),
         };
     }
@@ -214,42 +222,52 @@ const Scene = struct {
         // Calculate each pixel.
         for (0..img_height) |y| {
             for (0..img_width) |x| {
-                const screen_coord = self.screen.pixelToWorld(x, y);
-                const ray = self.screen.rayFromCameraThroughPixel(self.camera, screen_coord[0], screen_coord[1]);
-
-                // Calculate closest sphere.
-                var closest_intersect: f32 = -1;
-                var closest_sphere: ?Sphere = null;
-                for (self.spheres.items) |sphere| {
-                    const intersect = sphere.rayIntersect(self.camera, ray);
-                    if (intersect > 0 and (intersect < closest_intersect or closest_intersect < 0)) {
-                        closest_intersect = intersect;
-                        closest_sphere = sphere;
-                    }
-                }
-
-                // Set pixel color to color of closest sphere.
-                const index = y * img_width + x;
-                const hit_point = mul(closest_intersect, ray) + self.camera.position;
-                img_data[index] = if (closest_sphere) |sphere|
-                    sphere.color.intensify(self.calculateLighting(hit_point, sphere))
-                else
-                    Color.black();
+                img_data[y * img_width + x] = self.calculatePixel(x, y);
             }
         }
 
         return Image.init(img_width, img_height, img_data);
     }
 
+    fn calculatePixel(self: Self, x: usize, y: usize) Color {
+        const screen_coord = self.screen.pixelToWorld(x, y);
+        const ray = self.screen.rayFromCameraThroughPixel(self.camera, screen_coord[0], screen_coord[1]);
+
+        // Calculate closest sphere.
+        var closest_intersect: f32 = -1;
+        var closest_sphere: ?Sphere = null;
+        for (self.spheres.items) |sphere| {
+            const intersect = sphere.rayIntersect(self.camera.position, ray);
+            if (intersect > 0 and (intersect < closest_intersect or closest_intersect < 0)) {
+                closest_intersect = intersect;
+                closest_sphere = sphere;
+            }
+        }
+
+        // Set pixel color to color of closest sphere.
+        const hit_point = mul(closest_intersect, ray) + self.camera.position;
+        return if (closest_sphere) |sphere|
+            sphere.color.addLighting(self.light).intensify(self.calculateLighting(hit_point, sphere))
+        else
+            Color.black();
+    }
+
     fn calculateLighting(self: Self, hit_point: Vec3, sphere: Sphere) f32 {
         const normal = norm(hit_point - sphere.center);
         const ray_dir = norm(self.light.position - hit_point);
+        const light_dist = dist(hit_point, self.light.position);
 
         // If ray hits another sphere, we're in shadow.
-        // @todo
+        for (self.spheres.items) |other_sphere| {
+            // Don't intersect with ourself!
+            if (std.mem.eql(u8, sphere.name, other_sphere.name)) continue;
+            // If we hit another sphere, we have a shadow.
+            const intersect = other_sphere.rayIntersect(hit_point, ray_dir);
+            if (intersect > 0 and intersect < light_dist) return 0.0;
+        }
 
         const diffuse = dot(ray_dir, normal);
-        return diffuse * self.light.intensity;
+        return self.ambient_light + diffuse * self.light.intensity;
     }
 };
 
@@ -264,39 +282,60 @@ pub fn main() !void {
     };
 
     const screen = Screen{
-        .width = 640,
-        .height = 480,
+        .width = 1920,
+        .height = 1080,
         .focal_distance = 416,
     };
 
-    const light = Light{
+    const overhead_light = Light{
         .position = .{ 0, 80, 0 },
         .color = Color.white(),
         .intensity = 1.0,
     };
+    _ = overhead_light;
 
-    var scene = Scene.init(allocator, camera, screen, light);
+    const front_light = Light{
+        .position = .{ 0, 0, -50 },
+        .color = Color.white(),
+        .intensity = 1.0,
+    };
+    _ = front_light;
+
+    const diag_light = Light{
+        .position = .{ 20, 10, -30 },
+        .color = Color.white(),
+        .intensity = 0.9,
+    };
+    _ = diag_light;
+
+    const back_overhead_light = Light{
+        .position = .{ -5, 100, -60 },
+        .color = Color.rgb(255, 255, 255),
+        .intensity = 1.0,
+    };
+
+    var scene = Scene.init(allocator, camera, screen, back_overhead_light, 0.01);
     defer scene.deinit();
 
     try scene.spheres.append(Sphere{
-        .name = "Sphere (Pink)",
-        .center = .{ 0, 30, 20 },
+        .name = "Sphere (Red)",
+        .center = .{ 0, 30, 40 },
         .r = 20,
-        .color = Color.rgb(234, 89, 187),
+        .color = Color.rgb(255, 192, 203),
     });
 
     try scene.spheres.append(Sphere{
         .name = "Sphere (Blue)",
-        .center = .{ -20, 30, 0 },
+        .center = .{ -30, 20, 10 },
         .r = 10,
-        .color = Color.rgb(10, 20, 180),
+        .color = Color.rgb(144, 213, 255),
     });
 
     try scene.spheres.append(Sphere{
         .name = "Sphere (Green)",
         .center = .{ 0, -10, 0 },
         .r = 30,
-        .color = Color.rgb(10, 197, 100),
+        .color = Color.rgb(130, 135, 125),
     });
 
     const proj = try scene.project(allocator);
