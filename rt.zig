@@ -173,7 +173,7 @@ fn project(allocator: std.mem.Allocator, camera: Camera, screen: Screen, sphere:
 
             // @todo this logic is probably horribly naive and won't scale well to additional
             // spheres, but will explore later.
-            const use_sphere_color = sphere_intersect >= 0 and (sphere2_intersect < 0 or sphere2_intersect >= 0 and sphere_intersect > sphere2_intersect);
+            const use_sphere_color = sphere_intersect >= 0 and (sphere2_intersect < 0 or sphere2_intersect >= 0 and sphere_intersect <= sphere2_intersect);
             const use_sphere2_color = !use_sphere_color and sphere2_intersect >= 0;
 
             const color = if (use_sphere_color)
@@ -196,14 +196,14 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const sphere = Sphere{
-        .center = .{ 0, 40, 0 },
+        .center = .{ 0, 40, 20 },
         .r = 20,
         .color = .{ .r = 234, .g = 89, .b = 187 },
     };
 
     const sphere_blue = Sphere{
-        .center = .{ -70, -10, 0 },
-        .r = 20,
+        .center = .{ -20, 40, 0 },
+        .r = 10,
         .color = .{ .r = 10, .g = 20, .b = 180 },
     };
 
