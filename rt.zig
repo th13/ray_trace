@@ -4,15 +4,14 @@ const debug = std.debug;
 const math = std.math;
 const expect = std.testing.expect;
 
-const Pixel = struct {
+const Color = struct {
     const Self = @This();
     r: u8,
     g: u8,
     b: u8,
-    fn print(self: Self) !void {
-        try stdout.writeByte(self.r);
-        try stdout.writeByte(self.g);
-        try stdout.writeByte(self.b);
+
+    fn rgb(r: u8, g: u8, b: u8) Self {
+        return .{ .r = r, .g = g, .b = b };
     }
 
     fn black() Self {
@@ -22,15 +21,21 @@ const Pixel = struct {
     fn white() Self {
         return .{ .r = 255, .g = 255, .b = 255 };
     }
+
+    fn print(self: Self) !void {
+        try stdout.writeByte(self.r);
+        try stdout.writeByte(self.g);
+        try stdout.writeByte(self.b);
+    }
 };
 
 const Image = struct {
     const Self = @This();
     width: usize,
     height: usize,
-    data: []Pixel,
+    data: []Color,
 
-    fn init(width: usize, height: usize, data: []Pixel) Self {
+    fn init(width: usize, height: usize, data: []Color) Self {
         return .{ .width = width, .height = height, .data = data };
     }
 
@@ -46,31 +51,6 @@ const Image = struct {
         try self.printBinary();
     }
 };
-
-fn makeCenterCircle(allocator: std.mem.Allocator, width: usize, height: usize, r: usize) ![]Pixel {
-    var img: []Pixel = try allocator.alloc(Pixel, width * height);
-    const iheight: i64 = @intCast(height / 2);
-    const iwidth: i64 = @intCast(width / 2);
-    for (0..height) |y| {
-        for (0..width) |x| {
-            const iy: i64 = @intCast(y);
-            const ix: i64 = @intCast(x);
-            const dy = iy - iheight;
-            const dx = ix - iwidth;
-            const index = y * width + x;
-            if (dx * dx + dy * dy > r * r) {
-                img[index] = Pixel.white();
-            } else {
-                img[index] = Pixel.black();
-            }
-        }
-    }
-    return img;
-}
-
-//------------------------------------------------------------
-//  Sphere
-//------------------------------------------------------------
 
 const Vec3 = @Vector(3, f32);
 
@@ -97,9 +77,10 @@ fn div(x: Vec3, a: f32) Vec3 {
 
 const Sphere = struct {
     const Self = @This();
+    name: []const u8,
     center: Vec3,
     r: f32,
-    color: Pixel,
+    color: Color,
 
     fn rayIntersect(self: Self, camera: Camera, ray: Vec3) f32 {
         const L = camera.position - self.center;
@@ -159,36 +140,51 @@ const Screen = struct {
     }
 };
 
-fn project(allocator: std.mem.Allocator, camera: Camera, screen: Screen, sphere: Sphere, sphere2: Sphere) !Image {
-    const img_width: usize = @intFromFloat(screen.width);
-    const img_height: usize = @intFromFloat(screen.height);
-    var data = try allocator.alloc(Pixel, img_width * img_height);
-    for (0..img_height) |y| {
-        for (0..img_width) |x| {
-            const screen_coord = screen.pixelToWorld(x, y);
-            const ray = screen.rayFromCameraThroughPixel(camera, screen_coord[0], screen_coord[1]);
-            const index = y * img_width + x;
-            const sphere_intersect = sphere.rayIntersect(camera, ray);
-            const sphere2_intersect = sphere2.rayIntersect(camera, ray);
+const Scene = struct {
+    const Self = @This();
+    const SphereIntersect = struct {
+        sphere: Sphere,
+        intersection: f32,
+    };
+    camera: Camera,
+    screen: Screen,
+    spheres: []Sphere,
 
-            // @todo this logic is probably horribly naive and won't scale well to additional
-            // spheres, but will explore later.
-            const use_sphere_color = sphere_intersect >= 0 and (sphere2_intersect < 0 or sphere2_intersect >= 0 and sphere_intersect <= sphere2_intersect);
-            const use_sphere2_color = !use_sphere_color and sphere2_intersect >= 0;
+    /// Projects the current scene state onto a newly allocated `Image`.
+    fn project(self: Self, allocator: std.mem.Allocator) !Image {
+        const img_width: usize = @intFromFloat(self.screen.width);
+        const img_height: usize = @intFromFloat(self.screen.height);
+        var img_data = try allocator.alloc(Color, img_width * img_height);
 
-            const color = if (use_sphere_color)
-                sphere.color
-            else if (use_sphere2_color)
-                sphere2.color
-            else
-                Pixel.black();
+        // Calculate each pixel.
+        for (0..img_height) |y| {
+            for (0..img_width) |x| {
+                const screen_coord = self.screen.pixelToWorld(x, y);
+                const ray = self.screen.rayFromCameraThroughPixel(self.camera, screen_coord[0], screen_coord[1]);
 
-            data[index] = color;
+                // Calculate closest sphere.
+                var closest_intersect: f32 = -1;
+                var closest_sphere: ?Sphere = null;
+                for (self.spheres) |sphere| {
+                    const intersect = sphere.rayIntersect(self.camera, ray);
+                    if (intersect > 0 and (intersect < closest_intersect or closest_intersect < 0)) {
+                        closest_intersect = intersect;
+                        closest_sphere = sphere;
+                    }
+                }
+
+                // Set pixel color to color of closest sphere.
+                const index = y * img_width + x;
+                img_data[index] = if (closest_sphere) |sphere|
+                    sphere.color
+                else
+                    Color.black();
+            }
         }
+
+        return Image.init(img_width, img_height, img_data);
     }
-    return Image.init(@intFromFloat(screen.width), @intFromFloat(screen.height), data);
-}
-//------------------------------------------------------------
+};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -196,15 +192,17 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const sphere = Sphere{
+        .name = "Sphere (Pink)",
         .center = .{ 0, 40, 20 },
         .r = 20,
-        .color = .{ .r = 234, .g = 89, .b = 187 },
+        .color = Color.rgb(234, 89, 187),
     };
 
     const sphere_blue = Sphere{
+        .name = "Sphere (Blue)",
         .center = .{ -20, 40, 0 },
         .r = 10,
-        .color = .{ .r = 10, .g = 20, .b = 180 },
+        .color = Color.rgb(10, 20, 180),
     };
 
     const camera = Camera{
@@ -218,7 +216,22 @@ pub fn main() !void {
         .focal_distance = 416,
     };
 
-    const proj = try project(allocator, camera, screen, sphere, sphere_blue);
+    const spheres = try allocator.alloc(Sphere, 2);
+    defer allocator.free(spheres);
+    spheres[0] = sphere;
+    spheres[1] = sphere_blue;
+
+    const scene = Scene{
+        .camera = camera,
+        .screen = screen,
+        .spheres = spheres,
+    };
+
+    const proj = try scene.project(allocator);
     defer allocator.free(proj.data);
     try proj.printP6();
+
+    //const proj = try project(allocator, camera, screen, sphere, sphere_blue);
+    //defer allocator.free(proj.data);
+    //try proj.printP6();
 }
