@@ -6,26 +6,54 @@ const expect = std.testing.expect;
 
 const Color = struct {
     const Self = @This();
-    r: u8,
-    g: u8,
-    b: u8,
+    intensities: Vec3,
 
-    fn rgb(r: u8, g: u8, b: u8) Self {
-        return .{ .r = r, .g = g, .b = b };
+    fn rgb(red: u8, green: u8, blue: u8) Self {
+        return .{ .intensities = .{
+            Self.byteToIntensity(red),
+            Self.byteToIntensity(green),
+            Self.byteToIntensity(blue),
+        } };
     }
 
     fn black() Self {
-        return .{ .r = 0, .g = 0, .b = 0 };
+        return .{ .intensities = .{ 0, 0, 0 } };
     }
 
     fn white() Self {
-        return .{ .r = 255, .g = 255, .b = 255 };
+        return .{ .intensities = .{ 1, 1, 1 } };
+    }
+
+    fn intensify(self: Self, intensity: f32) Self {
+        return .{ .intensities = mul(intensity, self.intensities) };
     }
 
     fn print(self: Self) !void {
-        try stdout.writeByte(self.r);
-        try stdout.writeByte(self.g);
-        try stdout.writeByte(self.b);
+        try stdout.writeByte(self.r());
+        try stdout.writeByte(self.g());
+        try stdout.writeByte(self.b());
+    }
+
+    fn r(self: Self) u8 {
+        return Self.intensityToByte(self.intensities[0]);
+    }
+
+    fn g(self: Self) u8 {
+        return Self.intensityToByte(self.intensities[1]);
+    }
+
+    fn b(self: Self) u8 {
+        return Self.intensityToByte(self.intensities[2]);
+    }
+
+    fn intensityToByte(intensity: f32) u8 {
+        const clamped = @max(0.0, @min(1.0, intensity));
+        return @as(u8, @intFromFloat(clamped * 255.0));
+    }
+
+    fn byteToIntensity(byte: u8) f32 {
+        const scaled: f32 = @as(f32, @floatFromInt(byte)) / 255.0;
+        return @max(0, @min(1.0, scaled));
     }
 };
 
@@ -73,6 +101,10 @@ fn mul(a: f32, x: Vec3) Vec3 {
 
 fn div(x: Vec3, a: f32) Vec3 {
     return mul(1.0 / a, x);
+}
+
+fn dist(a: Vec3, b: Vec3) f32 {
+    return mag(a - b);
 }
 
 const Sphere = struct {
@@ -140,6 +172,13 @@ const Screen = struct {
     }
 };
 
+const Light = struct {
+    const Self = @This();
+    position: Vec3,
+    color: Color,
+    intensity: f32,
+};
+
 const Scene = struct {
     const Self = @This();
 
@@ -150,12 +189,14 @@ const Scene = struct {
 
     camera: Camera,
     screen: Screen,
+    light: Light,
     spheres: std.ArrayList(Sphere),
 
-    fn init(allocator: std.mem.Allocator, camera: Camera, screen: Screen) Self {
+    fn init(allocator: std.mem.Allocator, camera: Camera, screen: Screen, light: Light) Self {
         return .{
             .camera = camera,
             .screen = screen,
+            .light = light,
             .spheres = std.ArrayList(Sphere).init(allocator),
         };
     }
@@ -189,14 +230,26 @@ const Scene = struct {
 
                 // Set pixel color to color of closest sphere.
                 const index = y * img_width + x;
+                const hit_point = mul(closest_intersect, ray) + self.camera.position;
                 img_data[index] = if (closest_sphere) |sphere|
-                    sphere.color
+                    sphere.color.intensify(self.calculateLighting(hit_point, sphere))
                 else
                     Color.black();
             }
         }
 
         return Image.init(img_width, img_height, img_data);
+    }
+
+    fn calculateLighting(self: Self, hit_point: Vec3, sphere: Sphere) f32 {
+        const normal = norm(hit_point - sphere.center);
+        const ray_dir = norm(self.light.position - hit_point);
+
+        // If ray hits another sphere, we're in shadow.
+        // @todo
+
+        const diffuse = dot(ray_dir, normal);
+        return diffuse * self.light.intensity;
     }
 };
 
@@ -216,26 +269,32 @@ pub fn main() !void {
         .focal_distance = 416,
     };
 
-    var scene = Scene.init(allocator, camera, screen);
+    const light = Light{
+        .position = .{ 0, 80, 0 },
+        .color = Color.white(),
+        .intensity = 1.0,
+    };
+
+    var scene = Scene.init(allocator, camera, screen, light);
     defer scene.deinit();
 
     try scene.spheres.append(Sphere{
         .name = "Sphere (Pink)",
-        .center = .{ 0, 40, 20 },
+        .center = .{ 0, 30, 20 },
         .r = 20,
         .color = Color.rgb(234, 89, 187),
     });
 
     try scene.spheres.append(Sphere{
         .name = "Sphere (Blue)",
-        .center = .{ -20, 40, 0 },
+        .center = .{ -20, 30, 0 },
         .r = 10,
         .color = Color.rgb(10, 20, 180),
     });
 
     try scene.spheres.append(Sphere{
-        .name = "Sphere 3",
-        .center = .{ 0, 0, 0 },
+        .name = "Sphere (Green)",
+        .center = .{ 0, -10, 0 },
         .r = 30,
         .color = Color.rgb(10, 197, 100),
     });
