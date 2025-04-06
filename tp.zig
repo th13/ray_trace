@@ -1,13 +1,13 @@
 const std = @import("std");
 
-pub fn Ctx(comptime T: type) type {
-    return struct {
-        data: T,
-    };
-}
-
 pub const Task = struct {
-    operation: *const fn () void,
+    const Self = @This();
+    operation: *const fn (ctx: *anyopaque) void,
+    ctx: *anyopaque,
+
+    pub fn run(self: *const Self) void {
+        self.operation(self.ctx);
+    }
 };
 
 pub const ThreadPool = struct {
@@ -40,21 +40,30 @@ pub const ThreadPool = struct {
         self.running = false;
         self.mutex.unlock();
 
-        for (self.threads) |thread| {
-            thread.join();
-        }
-
         self.tasks.deinit();
         self.allocator.free(self.threads);
         self.allocator.destroy(self);
     }
 
-    pub fn submit(self: *Self, operation: *const fn () void) !void {
+    pub fn waitForAll(self: *Self) void {
+        self.mutex.lock();
+        self.running = false;
+        self.mutex.unlock();
+
+        for (self.threads) |thread| {
+            thread.join();
+        }
+    }
+
+    pub fn submit(self: *Self, operation: *const fn (*anyopaque) void, ctx: *anyopaque) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         if (!self.running) return error.PoolClosed;
-        try self.tasks.append(Task{ .operation = operation });
+        try self.tasks.append(Task{
+            .operation = operation,
+            .ctx = ctx,
+        });
     }
 
     fn worker(pool: *Self) void {
@@ -70,7 +79,7 @@ pub const ThreadPool = struct {
 
             pool.mutex.unlock();
             if (task) |t| {
-                t.operation();
+                t.run();
             } else {
                 std.time.sleep(1 * std.time.ns_per_ms);
             }
@@ -85,21 +94,48 @@ test "test some tasks" {
     defer pool.deinit();
     std.debug.print("Started thread pool with {d} threads\n", .{thread_count});
 
-    try pool.submit(task1);
-    try pool.submit(task2);
-    try pool.submit(task1);
-    try pool.submit(task2);
+    const results = try allocator.alloc(Result, 4);
+    defer allocator.free(results);
 
-    std.time.sleep(2 * std.time.ns_per_s);
+    try pool.submit(task1, &results[0]);
+    try pool.submit(task2, &results[1]);
+    try pool.submit(task1, &results[2]);
+    try pool.submit(task2, &results[3]);
+
+    //std.time.sleep(2 * std.time.ns_per_s);
+    pool.waitForAll();
+
+    for (results, 0..) |result, i| {
+        std.debug.print("Task {d} yielded {d}\n", .{ i, result.value });
+    }
+
     std.debug.print("Main thread done\n", .{});
 }
 
-fn task1() void {
+const Result = struct {
+    const Self = @This();
+    value: i32,
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator) !*Self {
+        return allocator.create(Self);
+    }
+
+    fn deinit(self: *Self) void {
+        self.allocator.destroy(self);
+    }
+};
+
+fn task1(ctx: *anyopaque) void {
+    const result: *Result = @ptrCast(@alignCast(ctx));
     std.debug.print("Task 1 running on thread {d}\n", .{std.Thread.getCurrentId()});
     std.time.sleep(500 * std.time.ns_per_ms);
+    result.value = 5;
 }
 
-fn task2() void {
+fn task2(ctx: *anyopaque) void {
+    const result: *Result = @ptrCast(@alignCast(ctx));
     std.debug.print("Task 2 running on thread {d}\n", .{std.Thread.getCurrentId()});
     std.time.sleep(300 * std.time.ns_per_ms);
+    result.value = 3;
 }
