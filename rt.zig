@@ -184,11 +184,9 @@ const Screen = struct {
     height: f32,
     focal_distance: f32,
 
-    fn pixelToWorld(self: Self, x: usize, y: usize) Vec3 {
-        const fx = @as(f32, @floatFromInt(x));
-        const fy = @as(f32, @floatFromInt(y));
-        const x_world = fx - self.width / 2.0;
-        const y_world = self.height / 2.0 - fy;
+    fn pixelToWorld(self: Self, x: f32, y: f32) Vec3 {
+        const x_world = x - self.width / 2.0;
+        const y_world = self.height / 2.0 - y;
         // This should probably actually be computed when creating the screen, relative to
         // camera.
         const z_world = -self.focal_distance;
@@ -225,15 +223,19 @@ const Scene = struct {
         data: []Color,
     };
 
+    const sample_count = 20;
+
     camera: Camera,
     screen: Screen,
     light: Light,
     ambient_light: f32,
     spheres: std.ArrayList(Sphere),
     pool: *tp.ThreadPool,
+    rand: std.Random,
 
-    fn init(allocator: std.mem.Allocator, camera: Camera, screen: Screen, light: Light, ambient_light: f32) !Self {
+    fn init(allocator: std.mem.Allocator, prng: *std.Random.DefaultPrng, camera: Camera, screen: Screen, light: Light, ambient_light: f32) !Self {
         const thread_count = try std.Thread.getCpuCount();
+
         return .{
             .camera = camera,
             .screen = screen,
@@ -241,6 +243,7 @@ const Scene = struct {
             .ambient_light = ambient_light,
             .spheres = std.ArrayList(Sphere).init(allocator),
             .pool = try tp.ThreadPool.init(allocator, thread_count),
+            .rand = prng.random(),
         };
     }
 
@@ -283,14 +286,24 @@ const Scene = struct {
 
     fn pixelTask(ctx: *anyopaque) void {
         var row: *PixelRow = @ptrCast(@alignCast(ctx));
-        for (0..row.width) |col| {
-            const color = row.scene.calculatePixel(col, row.y);
-            row.data[col] = color;
+        for (0..row.width) |x| {
+            // Get first sample
+            var blend = row.scene.samplePoint(x, row.y);
+            for (1..sample_count) |_| {
+                blend.intensities += row.scene.samplePoint(x, row.y).intensities;
+            }
+            const final_color = Color{ .intensities = div(blend.intensities, sample_count) };
+            row.data[x] = final_color;
         }
     }
 
-    fn calculatePixel(self: Self, x: usize, y: usize) Color {
-        const screen_coord = self.screen.pixelToWorld(x, y);
+    /// Samples a random point in the square bounded by -0.5<=(x-i)<=0.5, -0.5<=(y-j)<=0.5
+    fn samplePoint(self: Self, x: usize, y: usize) Color {
+        const i = self.rand.float(f32) - 0.5;
+        const j = self.rand.float(f32) - 0.5;
+        const fx = @as(f32, @floatFromInt(x));
+        const fy = @as(f32, @floatFromInt(y));
+        const screen_coord = self.screen.pixelToWorld(fx + i, fy + j);
         const ray = self.screen.rayFromCameraThroughPixel(self.camera, screen_coord[0], screen_coord[1]);
 
         // Calculate closest sphere.
@@ -336,24 +349,30 @@ pub fn main() !void {
     defer debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
+    var prng = std.Random.DefaultPrng.init(blk: {
+        var seed: u64 = undefined;
+        try std.posix.getrandom(std.mem.asBytes(&seed));
+        break :blk seed;
+    });
+
     const camera = Camera{
-        .position = .{ 0, 0, -90 },
+        .position = .{ 0, 0, -80 },
         .direction = .{ 0, 0, 1 },
     };
 
     const screen = Screen{
-        .width = 1920,
-        .height = 1080,
+        .width = 5120,
+        .height = 2880,
         .focal_distance = 416,
     };
 
     const overhead_light = Light{
-        .position = .{ 0, 80, 0 },
+        .position = .{ 0, 400, 0 },
         .color = Color.white(),
         .intensity = 1.0,
     };
 
-    var scene = try Scene.init(allocator, camera, screen, overhead_light, 0.01);
+    var scene = try Scene.init(allocator, &prng, camera, screen, overhead_light, 0.01);
     defer scene.deinit();
 
     try scene.spheres.append(Sphere{
