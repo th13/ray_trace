@@ -208,6 +208,11 @@ const Light = struct {
     intensity: f32,
 };
 
+const SceneConfig = struct {
+    ambient_light: f32,
+    enable_antialiasing: bool,
+};
+
 const Scene = struct {
     const Self = @This();
 
@@ -223,24 +228,22 @@ const Scene = struct {
         data: []Color,
     };
 
-    const sample_count = 20;
-
     camera: Camera,
     screen: Screen,
     light: Light,
-    ambient_light: f32,
+    config: SceneConfig,
     spheres: std.ArrayList(Sphere),
     pool: *tp.ThreadPool,
     rand: std.Random,
 
-    fn init(allocator: std.mem.Allocator, prng: *std.Random.DefaultPrng, camera: Camera, screen: Screen, light: Light, ambient_light: f32) !Self {
+    fn init(allocator: std.mem.Allocator, prng: *std.Random.DefaultPrng, camera: Camera, screen: Screen, light: Light, scene_config: SceneConfig) !Self {
         const thread_count = try std.Thread.getCpuCount();
 
         return .{
             .camera = camera,
             .screen = screen,
             .light = light,
-            .ambient_light = ambient_light,
+            .config = scene_config,
             .spheres = std.ArrayList(Sphere).init(allocator),
             .pool = try tp.ThreadPool.init(allocator, thread_count),
             .rand = prng.random(),
@@ -287,23 +290,30 @@ const Scene = struct {
     fn pixelTask(ctx: *anyopaque) void {
         var row: *PixelRow = @ptrCast(@alignCast(ctx));
         for (0..row.width) |x| {
+            const fx = @as(f32, @floatFromInt(x));
+            const fy = @as(f32, @floatFromInt(row.y));
+
             // Get first sample
-            var blend = row.scene.samplePoint(x, row.y);
-            for (1..sample_count) |_| {
-                blend.intensities += row.scene.samplePoint(x, row.y).intensities;
+            var blend = row.scene.samplePoint(fx, fy);
+
+            // Apply antialiasing if enabled
+            if (row.scene.config.enable_antialiasing) {
+                const offsets = [2]f32{ -0.25, 0.25 };
+                for (offsets) |offset_x| {
+                    for (offsets) |offset_y| {
+                        blend.intensities += row.scene.samplePoint(fx + offset_x, fy + offset_y).intensities;
+                    }
+                }
+                blend = Color{ .intensities = div(blend.intensities, 4.0) };
             }
-            const final_color = Color{ .intensities = div(blend.intensities, sample_count) };
-            row.data[x] = final_color;
+
+            row.data[x] = blend;
         }
     }
 
     /// Samples a random point in the square bounded by -0.5<=(x-i)<=0.5, -0.5<=(y-j)<=0.5
-    fn samplePoint(self: Self, x: usize, y: usize) Color {
-        const i = self.rand.float(f32) - 0.5;
-        const j = self.rand.float(f32) - 0.5;
-        const fx = @as(f32, @floatFromInt(x));
-        const fy = @as(f32, @floatFromInt(y));
-        const screen_coord = self.screen.pixelToWorld(fx + i, fy + j);
+    fn samplePoint(self: Self, x: f32, y: f32) Color {
+        const screen_coord = self.screen.pixelToWorld(x, y);
         const ray = self.screen.rayFromCameraThroughPixel(self.camera, screen_coord[0], screen_coord[1]);
 
         // Calculate closest sphere.
@@ -340,7 +350,7 @@ const Scene = struct {
         }
 
         const diffuse = dot(ray_dir, normal);
-        return self.ambient_light + diffuse * self.light.intensity;
+        return self.config.ambient_light + diffuse * self.light.intensity;
     }
 };
 
@@ -361,38 +371,41 @@ pub fn main() !void {
     };
 
     const screen = Screen{
-        .width = 5120,
-        .height = 2880,
-        .focal_distance = 416,
+        .width = 1920,
+        .height = 1080,
+        .focal_distance = 880,
     };
 
     const overhead_light = Light{
         .position = .{ 0, 400, 0 },
         .color = Color.white(),
-        .intensity = 1.0,
+        .intensity = 0.85,
     };
 
-    var scene = try Scene.init(allocator, &prng, camera, screen, overhead_light, 0.01);
+    var scene = try Scene.init(allocator, &prng, camera, screen, overhead_light, .{
+        .ambient_light = 0.01,
+        .enable_antialiasing = true,
+    });
     defer scene.deinit();
 
     try scene.spheres.append(Sphere{
         .name = "Sphere (Red)",
-        .center = .{ 0, 30, 40 },
-        .r = 20,
+        .center = .{ 0, -40, 250 },
+        .r = 40,
         .color = Color.rgb(255, 192, 203),
     });
 
     try scene.spheres.append(Sphere{
         .name = "Sphere (Blue)",
-        .center = .{ -30, 20, 10 },
-        .r = 10,
+        .center = .{ -200, 100, 300 },
+        .r = 50,
         .color = Color.rgb(144, 213, 255),
     });
 
     try scene.spheres.append(Sphere{
-        .name = "Sphere (Green)",
-        .center = .{ 0, -10, 0 },
-        .r = 30,
+        .name = "Sphere (Grey)",
+        .center = .{ 100, -100, 200 },
+        .r = 90,
         .color = Color.rgb(130, 135, 125),
     });
 
