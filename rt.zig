@@ -5,6 +5,20 @@ const math = std.math;
 const expect = std.testing.expect;
 const tp = @import("tp.zig");
 
+const Profiler = struct {
+    const Self = @This();
+    start_ns: i128,
+
+    fn start() Profiler {
+        return .{ .start_ns = std.time.nanoTimestamp() };
+    }
+
+    fn end(self: *const Self) f64 {
+        const elapsed_ns = std.time.nanoTimestamp() - self.start_ns;
+        return @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
+    }
+};
+
 const Color = struct {
     const Self = @This();
     intensities: Vec3,
@@ -38,6 +52,10 @@ const Color = struct {
         try stdout.writeByte(self.r());
         try stdout.writeByte(self.g());
         try stdout.writeByte(self.b());
+    }
+
+    fn printFmt(self: Self) void {
+        std.debug.print("({d}, {d}, {d})", .{ self.r(), self.g(), self.b() });
     }
 
     fn r(self: Self) u8 {
@@ -75,14 +93,21 @@ const Image = struct {
 
     fn printBinary(self: Self) !void {
         for (0..self.height * self.width) |i| {
-            const px = self.data[i];
-            try px.print();
+            try self.data[i].print();
         }
     }
 
     fn printP6(self: Self) !void {
-        try stdout.print("P6\n{d} {d}\n255\n", .{ self.width, self.height });
-        try self.printBinary();
+        var buffered_writer = std.io.bufferedWriter(stdout);
+        const writer = buffered_writer.writer();
+
+        try writer.print("P6\n{d} {d}\n255\n", .{ self.width, self.height });
+        for (self.data) |pixel| {
+            try writer.writeByte(pixel.r());
+            try writer.writeByte(pixel.g());
+            try writer.writeByte(pixel.b());
+        }
+        try buffered_writer.flush();
     }
 };
 
@@ -193,40 +218,75 @@ const Scene = struct {
         intersection: f32,
     };
 
+    const PixelRow = struct {
+        scene: *Scene,
+        width: usize,
+        y: usize,
+        data: []Color,
+    };
+
     camera: Camera,
     screen: Screen,
     light: Light,
     ambient_light: f32,
     spheres: std.ArrayList(Sphere),
+    pool: *tp.ThreadPool,
 
-    fn init(allocator: std.mem.Allocator, camera: Camera, screen: Screen, light: Light, ambient_light: f32) Self {
+    fn init(allocator: std.mem.Allocator, camera: Camera, screen: Screen, light: Light, ambient_light: f32) !Self {
+        const thread_count = try std.Thread.getCpuCount();
         return .{
             .camera = camera,
             .screen = screen,
             .light = light,
             .ambient_light = ambient_light,
             .spheres = std.ArrayList(Sphere).init(allocator),
+            .pool = try tp.ThreadPool.init(allocator, thread_count),
         };
     }
 
     fn deinit(self: Self) void {
         self.spheres.deinit();
+        self.pool.deinit();
     }
 
     /// Projects the current scene state onto a newly allocated `Image`.
-    fn project(self: Self, allocator: std.mem.Allocator) !Image {
+    fn project(self: *Self, allocator: std.mem.Allocator) !Image {
         const img_width: usize = @intFromFloat(self.screen.width);
         const img_height: usize = @intFromFloat(self.screen.height);
         var img_data = try allocator.alloc(Color, img_width * img_height);
 
         // Calculate each pixel.
+        const pixel_calc_profile = Profiler.start();
+        var rows = try allocator.alloc(PixelRow, img_height);
+        defer allocator.free(rows);
         for (0..img_height) |y| {
-            for (0..img_width) |x| {
-                img_data[y * img_width + x] = self.calculatePixel(x, y);
+            const row_i = y * img_width;
+            rows[y] = PixelRow{
+                .scene = self,
+                .width = img_width,
+                .y = y,
+                .data = img_data[row_i..(row_i + img_width)],
+            };
+            try self.pool.submit(pixelTask, &rows[y]);
+        }
+
+        self.pool.waitForAll();
+        std.debug.print("Pixel calculation took {d}s\n", .{pixel_calc_profile.end()});
+        for (rows) |*row| {
+            for (row.data, 0..) |_, x| {
+                img_data[row.y * row.width + x] = row.data[x];
             }
         }
 
         return Image.init(img_width, img_height, img_data);
+    }
+
+    fn pixelTask(ctx: *anyopaque) void {
+        var row: *PixelRow = @ptrCast(@alignCast(ctx));
+        for (0..row.width) |col| {
+            const color = row.scene.calculatePixel(col, row.y);
+            row.data[col] = color;
+        }
     }
 
     fn calculatePixel(self: Self, x: usize, y: usize) Color {
@@ -292,29 +352,8 @@ pub fn main() !void {
         .color = Color.white(),
         .intensity = 1.0,
     };
-    _ = overhead_light;
 
-    const front_light = Light{
-        .position = .{ 0, 0, -50 },
-        .color = Color.white(),
-        .intensity = 1.0,
-    };
-    _ = front_light;
-
-    const diag_light = Light{
-        .position = .{ 20, 10, -30 },
-        .color = Color.white(),
-        .intensity = 0.9,
-    };
-    _ = diag_light;
-
-    const back_overhead_light = Light{
-        .position = .{ -5, 100, -60 },
-        .color = Color.rgb(255, 255, 255),
-        .intensity = 1.0,
-    };
-
-    var scene = Scene.init(allocator, camera, screen, back_overhead_light, 0.01);
+    var scene = try Scene.init(allocator, camera, screen, overhead_light, 0.01);
     defer scene.deinit();
 
     try scene.spheres.append(Sphere{

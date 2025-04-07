@@ -102,7 +102,6 @@ test "test some tasks" {
     try pool.submit(task1, &results[2]);
     try pool.submit(task2, &results[3]);
 
-    //std.time.sleep(2 * std.time.ns_per_s);
     pool.waitForAll();
 
     for (results, 0..) |result, i| {
